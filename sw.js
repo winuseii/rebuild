@@ -1,5 +1,5 @@
 /* Offline shell. Network first, so a new version shows up on the next load; the cache is the fallback when offline. */
-var CACHE = "rebuild-v2";
+var CACHE = "rebuild-v3";
 var SHELL = ["./", "app.css", "app.js", "label.js", "manifest.webmanifest", "icon-192.png"];
 self.addEventListener("install", function(e){
   e.waitUntil(caches.open(CACHE).then(function(c){ return c.addAll(SHELL); }).then(function(){ return self.skipWaiting(); }));

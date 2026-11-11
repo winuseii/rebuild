@@ -1,14 +1,12 @@
 (function(){
 "use strict";
 
-/* ============================ PLAN CONSTANTS ============================ */
-var START = new Date(2026,8,1);      // 1 Sep 2026, a Tuesday
-var DEC   = new Date(2026,11,31);    // checkpoint
-var END   = new Date(2027,3,30);     // 30 Apr 2027
-var W0 = 105, W_DEC = 92, W_END = 82;
+/* ============================ PLAN ============================
+   Nothing here is tied to a calendar. The plan is three numbers you can change at any time:
+   where you started, where you are going, and how fast. Everything else is worked out from them. */
 var DAY = 86400000;
 var KCAL_PER_KG = 7700;
-var DEFAULTS = { kcal:2250, protein:120, maint:2950 };
+var DEFAULTS = { kcal:2250, protein:120, maint:2950, pace:0.7 };
 
 /* Habit checklist. Keys must match the Log sheet headers exactly. */
 var ITEMS = [
@@ -44,17 +42,18 @@ var CUES = [
   [11,99,"Eyes on the horizon, ribs stacked over hips."]
 ];
 
-var PHASES = [
-  {from:1, to:3,  name:"Foundation", dates:"1–21 Sep",
-   body:"Gym at 60%, three or four reps short of failure. Morning protein every day. Halve the sugar in tea. Learn to log — accuracy matters more than the number."},
-  {from:4, to:10, name:"Build", dates:"22 Sep – 9 Nov",
-   body:"Full intensity. Milk test in weeks 4–5, challenge on 6 Oct. The first real check-ins start setting your calorie target from your own data."},
-  {from:11,to:18, name:"Push", dates:"10 Nov – 4 Jan",
-   body:"The longest grind. Diet break at maintenance in week 13 (24–30 Nov). Checkpoint on 31 December: 92 kg on the trend line."},
-  {from:19,to:27, name:"Reset", dates:"5 Jan – 8 Mar",
-   body:"Repeat bloodwork, new photos, new walking video. Re-derive maintenance at the new weight. The phase your last three attempts never reached."},
-  {from:28,to:35, name:"Finish", dates:"9 Mar – 30 Apr",
-   body:"82 kg by 30 April, 80 as the stretch. Then a reverse: add 100 kcal a week until the trend flattens. Maintenance is a skill, not an afterthought."}
+/* Stages follow how far you have come, not what the date is. */
+var STAGES = [
+  {name:"Foundation", when:"Your first two weeks",
+   body:"Learn to log. Accuracy matters more than the number. Morning protein every day. Halve the sugar in tea. Train at 60%, three or four reps short of failure."},
+  {name:"Build", when:"The first third of the way",
+   body:"Full intensity in the gym. The weekly check-in starts to set your calories from your own data, not from a formula."},
+  {name:"Push", when:"The middle third",
+   body:"The longest grind. Take a week at maintenance every 10 to 12 weeks. Repeat the bloodwork, the photos and the walking video here."},
+  {name:"Finish", when:"The last third",
+   body:"Loss slows as you get lighter. That is normal. Lower the pace if training suffers. The date moves; the direction does not."},
+  {name:"Hold", when:"At your goal",
+   body:"Add 100 kcal a week until the trend stays flat for two weeks. That number is your new maintenance. Maintenance is a skill, not an afterthought."}
 ];
 
 /* ---- built-in food library. Values are estimates; edit any of them under My foods. ---- */
@@ -369,11 +368,32 @@ function toast(msg, isErr){
 function failed(what){ return function(){ toast("Couldn't " + what + " — check your connection", true); }; }
 
 /* ============================ SETTINGS / TARGETS ============================ */
+function plan(){
+  var first = weighIns()[0];
+  return { start: settings.planStart || (first ? first.date : TODAY),
+           w0: num(settings.startWeight) || (first ? Number(first.weight) : null),
+           goal: num(settings.goal), pace: num(settings.pace) || DEFAULTS.pace };
+}
+/** 0 at the start weight, 1 at the goal. null until there is a start, a goal and a weigh-in. */
+function progress(){
+  var p = plan(), t = trendOn(TODAY);
+  if (p.w0 == null || p.goal == null || t == null || p.w0 <= p.goal) return null;
+  return clamp((p.w0 - t)/(p.w0 - p.goal), 0, 1);
+}
+function stageNow(){
+  var pr = progress();
+  if (pr !== null && pr >= 1) return 4;
+  if (weekNo(TODAY) <= 2) return 0;
+  return pr === null || pr < 1/3 ? 1 : pr < 2/3 ? 2 : 3;
+}
 function cfg(){
+  var p = plan(), w = trendOn(TODAY) || p.w0;
+  // shortcut: 29.5 kcal per kg is a rough guess at maintenance; the weekly check-in replaces it with a measured number
+  var maint = num(settings.maint) || (w ? round50(w*29.5) : DEFAULTS.maint);
   return {
-    kcal:    num(settings.kcal)    || DEFAULTS.kcal,
-    protein: num(settings.protein) || DEFAULTS.protein,
-    maint:   num(settings.maint)   || DEFAULTS.maint
+    kcal:    num(settings.kcal)    || (w ? Math.max(1800, round50(maint - p.pace*KCAL_PER_KG/7)) : DEFAULTS.kcal),
+    protein: num(settings.protein) || (w ? clamp(Math.round(w*1.2/5)*5, 90, 180) : DEFAULTS.protein),
+    maint:   maint
   };
 }
 function setSetting(k, v){
@@ -390,24 +410,14 @@ function kcalTarget(d){
   return c.kcal;
 }
 
-/* ============================ WEEKS / PHASES ============================ */
+/* ============================ WEEKS ============================ */
 function weekNo(s){
-  var n = Math.floor((parseIso(s || TODAY) - START)/DAY);
-  if (n < 0) return 0;
-  return Math.max(1, Math.min(35, Math.floor(n/7)+1));
+  var n = Math.floor((parseIso(s || TODAY) - parseIso(plan().start))/DAY);
+  return n < 0 ? 0 : Math.floor(n/7)+1;
 }
-function weekStart(w){ return iso(new Date(START.getTime() + (w-1)*7*DAY)); }
-function phaseFor(w){
-  for (var i=0;i<PHASES.length;i++) if (w>=PHASES[i].from && w<=PHASES[i].to) return i;
-  return w < 1 ? -1 : PHASES.length-1;
-}
-/** Milk test: weeks 4–5 elimination, first day of week 6 is the challenge. */
-function milkTest(s){
-  var w = weekNo(s);
-  if (w === 4 || w === 5) return { stage:"elim", day: Math.floor((parseIso(s) - parseIso(weekStart(4)))/DAY) + 1 };
-  if (s === weekStart(6)) return { stage:"challenge" };
-  return null;
-}
+function weekStart(w){ return addDays(plan().start, (w-1)*7); }
+/* the milk test is no longer on the calendar, so no day is ever inside it */
+function milkTest(){ return null; }
 
 /* ============================ DAYS ============================ */
 function blankDay(d){
@@ -457,7 +467,7 @@ function lossRate(span){
   var from = addDays(TODAY, -span);
   var pts = weighIns().filter(function(p){ return p.date >= from; });
   if (pts.length < 5) return null;
-  var xs = pts.map(function(p){ return (parseIso(p.date) - START)/DAY; }), ys = pts.map(function(p){ return Number(p.weight); });
+  var xs = pts.map(function(p){ return (parseIso(p.date) - parseIso(pts[0].date))/DAY; }), ys = pts.map(function(p){ return Number(p.weight); });
   var mx = xs.reduce(function(a,b){return a+b;},0)/xs.length, my = ys.reduce(function(a,b){return a+b;},0)/ys.length;
   var num_ = 0, den = 0;
   for (var i=0;i<xs.length;i++){ num_ += (xs[i]-mx)*(ys[i]-my); den += (xs[i]-mx)*(xs[i]-mx); }
@@ -582,30 +592,28 @@ function afterFoodChange(s){
 
 /* ============================ RENDER: TOP + STEPPER ============================ */
 function renderTop(){
-  var w = weekNo(TODAY), pi = phaseFor(w), now = midnight(new Date());
-  var beforeDec = now <= DEC, target = beforeDec ? DEC : END;
-  var left = Math.max(0, Math.ceil((target - now)/DAY));
-  $("eyebrow").innerHTML = w === 0 ? "Starts 1 Sep" :
-    "Wk <b>"+String(w).padStart(2,"0")+"</b> · "+esc(PHASES[pi].name)+" · "+left+" days to "+(beforeDec?"31 Dec":"30 Apr");
+  var p = plan(), t = trendOn(TODAY), w = weekNo(TODAY);
+  var toGo = p.goal != null && t != null ? t - p.goal : null;
+  $("eyebrow").innerHTML = p.goal == null ? "No goal set yet" :
+    "Wk <b>"+String(w).padStart(2,"0")+"</b> · "+esc(STAGES[stageNow()].name)+" · "+
+    (toGo === null ? "goal "+p.goal+" kg" : toGo <= 0 ? "at goal" : toGo.toFixed(1)+" kg to go");
 
   $$("[data-stepper]").forEach(function(el){
     var isToday = CUR === TODAY, label = isToday ? "Today" : CUR === addDays(TODAY,-1) ? "Yesterday" : prettyDate(CUR, {weekday:"long"});
     el.innerHTML =
       '<button data-step="-1" aria-label="Previous day">'+ICON.left+'</button>'+
-      '<div class="d'+(isToday?"":" past")+'">'+esc(label)+'<small>'+(isToday ? prettyDate(CUR) : "Editing "+prettyDate(CUR))+'</small></div>'+
+      '<div class="d'+(isToday?"":" past")+'">'+esc(label)+'<small>'+(isToday ? prettyDate(CUR) : "Editing "+prettyDate(CUR)+' <button class="tdy" data-today aria-label="Go back to today">today</button>')+'</small></div>'+
       '<button data-step="1" aria-label="Next day"'+(isToday?" disabled":"")+'>'+ICON.right+'</button>';
   });
 }
 
 /* ============================ RENDER: TODAY ============================ */
 function renderBanners(){
-  var out = [], w = weekNo(CUR), mt = milkTest(CUR), d = day(CUR);
-  if (mt && mt.stage === "elim")
-    out.push(['warn','Milk test · day '+mt.day+' of 14','<b>No dairy at all</b> — no milk in tea, no curd, paneer, whey or milk sweets. Scan packets: anything with milk solids gets flagged.']);
-  if (mt && mt.stage === "challenge")
-    out.push(['accent','Milk test · challenge day','Before food: <b>one large glass of plain milk</b> on an empty stomach. Note what happens over the next 6 hours in Notes below — bloating, cramps, loose stools, skin.']);
-  if (w === 13)
-    out.push(['good','Diet break week','Eat at maintenance all week — switch the day to <b>Break</b> below. It isn\'t a cheat: it refills glycogen, settles hunger hormones, and makes the Push phase survivable.']);
+  var out = [], w = weekNo(CUR), d = day(CUR);
+  if (plan().goal == null)
+    out.push(['accent','Set your plan','Three numbers: where you are, where you want to be, and how fast. <button class="link" id="set-plan">Set them now</button>']);
+  if (w > 0 && w % 12 === 0)
+    out.push(['good','Diet break week','Eat at maintenance all week — switch the day to <b>Break</b> below. It isn\'t a cheat: it refills glycogen, settles hunger hormones, and makes the next stretch survivable.']);
   if (parseIso(CUR).getDay() === 0 && CUR === TODAY)
     out.push(['accent','Sunday check-in','Weigh in, measure your waist at the navel, then read the verdict on <b>Progress</b>. Every 4th Sunday: front, side and back photos in the same light.']);
   if (d.mode === "exam")
@@ -615,6 +623,7 @@ function renderBanners(){
   $("banners").innerHTML = out.map(function(b){
     return '<div class="banner '+b[0]+'"><span class="k">'+b[1]+'</span>'+b[2]+'</div>';
   }).join("");
+  if ($("set-plan")) $("set-plan").addEventListener("click", openSettings);
 }
 
 function renderHero(){
@@ -1066,22 +1075,89 @@ function openLibrary(){
    4. No barcode, or no data → the label is read on the phone (OCR), then parsed in label.js.
    Every path ends at a form you check before anything is saved. */
 function openScanner(){
+  var live = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
   openSheet("Scan a packet",
     '<div class="scanhero">'+ICON.camera+
-      '<div class="t">Photograph the back of the packet</div>'+
-      '<div class="s">Get the nutrition table and the barcode in frame if you can. Flatten it, avoid glare.</div></div>'+
-    '<div class="btnrow"><button class="btn accent" id="sc-cam">Take photo<span class="ic">'+ICON.arrow+'</span></button></div>'+
-    '<div class="btnrow" style="margin-top:8px"><button class="btn quiet" id="sc-gal">Choose from gallery</button></div>'+
-    '<details style="margin-top:14px"><summary>Type the barcode instead</summary>'+
+      '<div class="t">Scan the packet</div>'+
+      '<div class="s">Live scan reads the barcode by itself. A photo can read the nutrition table too.</div></div>'+
+    (live ? '<div class="btnrow"><button class="btn accent" id="sc-live">Scan live<span class="ic">'+ICON.arrow+'</span></button></div>' : '')+
+    '<div class="btnrow" style="margin-top:8px"><button class="btn'+(live?" quiet":" accent")+'" id="sc-cam">Take photo</button><button class="btn quiet" id="sc-gal">From gallery</button></div>'+
+    '<details style="margin-top:14px"><summary>Paste text from Google Lens</summary>'+
+      '<p class="tiny" style="margin:8px 0">In Google Lens: point at the nutrition table, tap Text, tap Select all, tap Copy. Paste it here.</p>'+
+      '<textarea id="sc-text" placeholder="Energy 480 kcal  Protein 6 g …"></textarea>'+
+      '<div class="btnrow"><button class="btn" id="sc-read">Read this text</button></div></details>'+
+    '<details><summary>Type the barcode instead</summary>'+
       '<div class="searchrow"><input class="num" id="sc-code" inputmode="numeric" placeholder="8901234567890"><button class="btn sm" id="sc-go">Look up</button></div></details>',
     function(){
+      if (live) $("sc-live").addEventListener("click", openLive);
       $("sc-cam").addEventListener("click", function(){ $("cam").click(); });
       $("sc-gal").addEventListener("click", function(){ $("gallery").click(); });
       $("sc-go").addEventListener("click", function(){
         var code = $("sc-code").value.replace(/\D/g,"");
         if (code.length >= 8) handleBarcode(code, null);
       });
+      $("sc-read").addEventListener("click", function(){
+        var r = parseLabelText_($("sc-text").value);
+        if (!r.readable) { toast("No calories found in that text. Copy the whole table.", true); return; }
+        r.source = "Pasted text"; r.note = "Check every number against the packet";
+        openFoodForm({ scan: scanResult(r, "", null), food: foodFromScan(r, ""), after:"log" });
+      });
     });
+}
+
+/* ---- live camera ---- */
+var liveStream = null, detectorP = null;
+function stopLive(){
+  if (liveStream) { liveStream.getTracks().forEach(function(t){ t.stop(); }); liveStream = null; }
+}
+/** The browser's own barcode reader (Android), or a free one downloaded on first use (iPhone, Windows, Mac). */
+function getDetector(){
+  if (!detectorP) detectorP = ("BarcodeDetector" in window
+      ? Promise.resolve(window.BarcodeDetector)
+      : import("https://cdn.jsdelivr.net/npm/barcode-detector@2.3.1/dist/es/pure.min.js").then(function(m){ return m.BarcodeDetector; }))
+    .then(function(D){ return new D({ formats:["ean_13","ean_8","upc_a","upc_e"] }); })
+    .catch(function(){ detectorP = null; return null; });
+  return detectorP;
+}
+function grabFrame(v){
+  var c = document.createElement("canvas");
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext("2d").drawImage(v, 0, 0);
+  return c;
+}
+function openLive(){
+  openSheet("Live scan",
+    '<div class="live"><video id="lv" playsinline muted></video><div class="aim"></div></div>'+
+    '<p class="sub" id="lv-msg">Starting the camera…</p>'+
+    '<div class="btnrow"><button class="btn" id="lv-snap">Read the nutrition table</button></div>'+
+    '<p class="tiny">For the table: fill the frame with it, hold still, then tap the button.</p>',
+    function(){
+      $("lv-snap").addEventListener("click", function(){
+        var v = $("lv"); if (!v || !v.videoWidth) return;
+        var c = grabFrame(v); stopLive(); runLabelRead(c, "");
+      });
+      navigator.mediaDevices.getUserMedia({ audio:false, video:{ facingMode:{ ideal:"environment" }, width:{ ideal:1920 }, height:{ ideal:1080 } } })
+        .then(function(st){
+          var v = $("lv");
+          if (!v) { st.getTracks().forEach(function(t){ t.stop(); }); return; }
+          liveStream = st; v.srcObject = st; v.play();
+          getDetector().then(function(det){
+            if (!$("lv-msg")) return;
+            $("lv-msg").textContent = det ? "Point at the barcode. It reads by itself." : "Barcodes can not be read live here. Use the button for the nutrition table.";
+            if (!det) return;
+            (function tick(){
+              if (!liveStream || $("lv") !== v) { stopLive(); return; }       // the sheet was closed or replaced
+              if (v.readyState < 2) { setTimeout(tick, 300); return; }
+              det.detect(v).then(function(r){
+                if (!liveStream) return;
+                if (r && r.length) { stopLive(); if (navigator.vibrate) navigator.vibrate(60); handleBarcode(r[0].rawValue, null); }
+                else setTimeout(tick, 250);
+              }).catch(function(){ setTimeout(tick, 600); });
+            })();
+          });
+        })
+        .catch(function(){ scanFail("The camera did not open. Allow the camera for this site, or take a photo instead.", null, ""); });
+    }, stopLive);
 }
 
 function scanProgress(steps, thumb){
@@ -1132,13 +1208,10 @@ function loadToCanvas(file, max, cb){
   img.src = url;
 }
 
-function detectBarcode(canvas, cb){
-  if (!("BarcodeDetector" in window)) { cb(null); return; }
-  try {
-    new window.BarcodeDetector({ formats:["ean_13","ean_8","upc_a","upc_e"] }).detect(canvas)
-      .then(function(r){ cb(r && r.length ? r[0].rawValue : null); })
-      .catch(function(){ cb(null); });
-  } catch (e) { cb(null); }
+function detectBarcode(src, cb){
+  getDetector().then(function(d){ return d ? d.detect(src) : []; })
+    .then(function(r){ cb(r && r.length ? r[0].rawValue : null); })
+    .catch(function(){ cb(null); });
 }
 
 function handleBarcode(code, canvas){
@@ -1187,10 +1260,17 @@ function scanResult(r, code, canvas){
 }
 
 /* ============================ RENDER: PROGRESS ============================ */
+/** Where the plan says you should be on a day: the start weight, falling at your pace, stopping at the goal. */
 function planLineAt(ms){
-  var t0 = START.getTime(), td = DEC.getTime(), t1 = END.getTime();
-  if (ms <= td) return W0 + (W_DEC - W0) * (ms - t0)/(td - t0);
-  return W_DEC + (W_END - W_DEC) * (ms - td)/(t1 - td);
+  var p = plan();
+  if (p.w0 == null || p.goal == null) return null;
+  return Math.max(p.goal, p.w0 - p.pace * (ms - parseIso(p.start).getTime())/DAY/7);
+}
+/** When the plan line reaches the goal, in ms. */
+function planEnd(){
+  var p = plan();
+  if (p.w0 == null || p.goal == null || p.w0 <= p.goal) return null;
+  return parseIso(p.start).getTime() + (p.w0 - p.goal)/p.pace*7*DAY;
 }
 /** Share of days in the range with a complete food log (1,200 kcal or more). */
 function loggedShare(fromIso, toIso){
@@ -1202,7 +1282,7 @@ function loggedShare(fromIso, toIso){
 /**
  * The Sunday verdict. One decision, made with a rule instead of a mood.
  *   c.rate       kg lost per week over the last 3 weeks (positive = losing), or null
- *   c.needed     kg/week still needed to reach the next checkpoint on time
+ *   c.needed     the pace you chose, kg/week (null with no goal)
  *   c.logged     share of the last 7 days with a complete food log, 0–1
  *   c.steps      average daily steps over the last 7 days (0 if none entered)
  *   c.waistDelta waist change over ~2 weeks in cm (negative = smaller), or null
@@ -1225,22 +1305,24 @@ function checkinVerdict(c){
   if (c.rate > 1.1 && c.week > 4)
     return { tone:"warn", title:"Too fast — eat a little more", text:"Over 1.1 kg a week costs muscle and sets up the binge. Add 150 kcal, from carbs around training.", adjust:150 };
   if (c.needed !== null && c.rate < c.needed - 0.15)
-    return { tone:"warn", title:"On plan, short of the checkpoint", text:"A healthy rate, but slower than the " + c.needed.toFixed(2) + " kg/week the checkpoint needs. Push steps before cutting food — the date can move, your muscle can't come back.", adjust:0 };
+    return { tone:"warn", title:"Slower than your pace", text:"A healthy rate, but slower than the " + c.needed.toFixed(2) + " kg/week you chose. Push steps before cutting food, or lower the pace in Settings. The date can move; your muscle can't come back.", adjust:0 };
   return { tone:"good", title:"On track — change nothing", text:"Losing " + c.rate.toFixed(2) + " kg a week with " + Math.round(c.logged*7) + " of 7 days logged. This is the plan working. Same again next week.", adjust:0 };
 }
 
 function renderStats(){
   var tr = trendSeries(), last = tr.length ? tr[tr.length-1] : null;
   var rate = lossRate(21), est = maintenanceEstimate(), now = midnight(new Date());
-  var goal = now <= DEC ? W_DEC : W_END, target = now <= DEC ? DEC : END;
-  var proj = last && rate !== null ? last.t - rate * ((target - now)/DAY/7) : null;
-  var line = planLineAt(now.getTime()), vsLine = last ? last.t - line : null;
+  var p = plan();
+  // the finish date is an answer, not a deadline: it moves with your real rate
+  var eta = last && p.goal != null && rate !== null && rate > 0.05 && last.t > p.goal ? new Date(now.getTime() + (last.t - p.goal)/rate*7*DAY) : null;
+  var line = planLineAt(now.getTime()), vsLine = last && line !== null ? last.t - line : null;
   var html = [
     ['<span>'+(last ? last.t.toFixed(1) : "—")+'</span><small>kg</small>', 'Trend weight', ''],
     ['<span>'+(rate === null ? "—" : (rate>=0?"−":"+")+Math.abs(rate).toFixed(2))+'</span><small>kg/wk</small>', 'Last 3 weeks',
       rate === null ? "" : rate >= 0.45 && rate <= 1.1 ? "good" : rate > 1.1 ? "warn" : "bad"],
-    ['<span>'+(proj === null ? "—" : proj.toFixed(1))+'</span><small>kg</small>', 'At this pace on '+(now<=DEC?"31 Dec":"30 Apr"),
-      proj === null ? "" : proj <= goal + 0.5 ? "good" : proj <= goal + 2 ? "warn" : "bad"],
+    ['<span>'+(eta ? eta.toLocaleDateString("en-IN",{day:"numeric",month:"short"}) : "—")+'</span><small>'+(eta ? eta.getFullYear() : "")+'</small>',
+      p.goal == null ? "Set a goal to see the date" : 'Goal of '+p.goal+' kg at this pace',
+      eta === null || rate === null ? "" : rate >= p.pace - 0.15 ? "good" : "warn"],
     ['<span>'+(vsLine === null ? "—" : (vsLine<=0?"−":"+")+Math.abs(vsLine).toFixed(1))+'</span><small>kg</small>', vsLine === null ? "vs plan line" : (vsLine <= 0 ? "Ahead of the plan line" : "Behind the plan line"),
       vsLine === null ? "" : vsLine <= 0.5 ? "good" : vsLine <= 2 ? "warn" : "bad"],
     ['<span>'+(est ? fmt(round50(est.tdee)) : "—")+'</span><small>kcal</small>', est ? "Your maintenance, measured" : "Maintenance — needs 3 weeks of logs", ''],
@@ -1250,48 +1332,47 @@ function renderStats(){
 }
 
 function renderChart(){
-  var box = $("chart"), tr = trendSeries();
+  var box = $("chart"), tr = trendSeries(), p = plan();
+  $("chart-aside").textContent = p.w0 != null && p.goal != null ? n1(p.w0) + " → " + p.goal + " KG" : "";
   if (tr.length < 2){ box.innerHTML = '<div class="empty">Two mornings of weigh-ins and the line appears.</div>'; return; }
   var W=600,H=260,ml=34,mr=10,mt=14,mb=24, iw=W-ml-mr, ih=H-mt-mb;
-  var t0=START.getTime(), t1=END.getTime();
-  var vals = tr.map(function(p){return p.w;}).concat([W0, W_END]);
-  var lo=Math.floor(Math.min.apply(null,vals)-1.5), hi=Math.ceil(Math.max.apply(null,vals)+1.5);
-  var x=function(ms){ return ml+(ms-t0)/(t1-t0)*iw; }, y=function(v){ return mt+(hi-v)/(hi-lo)*ih; };
   var ms=function(s){ return parseIso(s).getTime(); };
+  var today = midnight(new Date()).getTime(), pe = planEnd();
+  // the chart runs from your first day to the end of the plan line, and never stops short of next month
+  var t0 = Math.min(ms(p.start), ms(tr[0].date)), t1 = Math.max(today + 28*DAY, pe || 0);
+  var vals = tr.map(function(q){return q.w;}).concat(p.w0 != null ? [p.w0] : [], p.goal != null ? [p.goal] : []);
+  var lo=Math.floor(Math.min.apply(null,vals)-1.5), hi=Math.ceil(Math.max.apply(null,vals)+1.5);
+  var x=function(t){ return ml+(t-t0)/(t1-t0)*iw; }, y=function(v){ return mt+(hi-v)/(hi-lo)*ih; };
   var s='<svg class="chart" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Weight trend against the plan line">';
   var step = hi - lo > 16 ? 4 : 2;
   for (var v=Math.ceil(lo/step)*step; v<=hi; v+=step){
     s+='<line x1="'+ml+'" x2="'+(W-mr)+'" y1="'+y(v).toFixed(1)+'" y2="'+y(v).toFixed(1)+'" stroke="var(--line)" stroke-width="1"/>'+
-       '<text x="'+(ml-6)+'" y="'+(y(v)+4).toFixed(1)+'" text-anchor="end" font-size="11" font-family="JetBrains Mono,monospace" fill="var(--ink-3)">'+v+'</text>';
+       '<text x="'+(ml-6)+'" y="'+(y(v)+4).toFixed(1)+'" text-anchor="end" font-size="11" fill="var(--ink-3)">'+v+'</text>';
   }
-  [[2026,8,"SEP"],[2026,9,"OCT"],[2026,10,"NOV"],[2026,11,"DEC"],[2027,0,"JAN"],[2027,1,"FEB"],[2027,2,"MAR"],[2027,3,"APR"]].forEach(function(m){
-    var mx=x(new Date(m[0],m[1],1).getTime());
-    s+='<text x="'+(mx+2).toFixed(1)+'" y="'+(H-6)+'" font-size="11" font-family="JetBrains Mono,monospace" fill="var(--ink-3)">'+m[2]+'</text>';
-  });
-  s+='<path d="M'+x(t0).toFixed(1)+' '+y(W0).toFixed(1)+' L'+x(DEC.getTime()).toFixed(1)+' '+y(W_DEC).toFixed(1)+' L'+x(t1).toFixed(1)+' '+y(W_END).toFixed(1)+
+  var months = (t1 - t0)/DAY/30.4, every = months > 16 ? 3 : months > 8 ? 2 : 1, d0 = new Date(t0), k = 0;
+  for (var d = new Date(d0.getFullYear(), d0.getMonth()+1, 1); d.getTime() < t1; d = new Date(d.getFullYear(), d.getMonth()+1, 1), k++){
+    if (k % every === 0) s+='<text x="'+(x(d.getTime())+2).toFixed(1)+'" y="'+(H-6)+'" font-size="11" fill="var(--ink-3)">'+d.toLocaleDateString("en-IN",{month:"short"}).toUpperCase()+'</text>';
+  }
+  if (pe) s+='<path d="M'+x(ms(p.start)).toFixed(1)+' '+y(p.w0).toFixed(1)+' L'+x(pe).toFixed(1)+' '+y(p.goal).toFixed(1)+
      '" fill="none" stroke="var(--ink-3)" stroke-width="1.5" stroke-dasharray="4 5"/>';
-  var dx = x(DEC.getTime());
-  s+='<line x1="'+dx.toFixed(1)+'" y1="'+mt+'" x2="'+dx.toFixed(1)+'" y2="'+(mt+ih)+'" stroke="var(--line)" stroke-width="1"/>'+
-     '<text x="'+(dx+5).toFixed(1)+'" y="'+(mt+10)+'" font-size="11" font-family="JetBrains Mono,monospace" fill="var(--ink-2)">31 DEC · 92</text>';
-  var nx = x(midnight(new Date()).getTime());
+  if (p.goal != null) s+='<text x="'+(W-mr)+'" y="'+(y(p.goal)-6).toFixed(1)+'" text-anchor="end" font-size="11" fill="var(--ink-2)">GOAL · '+p.goal+'</text>';
+  var nx = x(today);
   s+='<line x1="'+nx.toFixed(1)+'" y1="'+mt+'" x2="'+nx.toFixed(1)+'" y2="'+(mt+ih)+'" stroke="var(--accent)" stroke-opacity=".35" stroke-width="1"/>';
-  tr.forEach(function(p){
-    s+='<circle cx="'+x(ms(p.date)).toFixed(1)+'" cy="'+y(p.w).toFixed(1)+'" r="2.4" fill="var(--ink-3)" fill-opacity=".55"/>';
+  tr.forEach(function(q){
+    s+='<circle cx="'+x(ms(q.date)).toFixed(1)+'" cy="'+y(q.w).toFixed(1)+'" r="2.4" fill="var(--ink-3)" fill-opacity=".55"/>';
   });
-  s+='<path d="'+tr.map(function(p,i){ return (i?"L":"M")+x(ms(p.date)).toFixed(1)+" "+y(p.t).toFixed(1); }).join(" ")+
+  s+='<path d="'+tr.map(function(q,i){ return (i?"L":"M")+x(ms(q.date)).toFixed(1)+" "+y(q.t).toFixed(1); }).join(" ")+
      '" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
   var L = tr[tr.length-1], lx = x(ms(L.date)), ly = y(L.t);
   s+='<circle cx="'+lx.toFixed(1)+'" cy="'+ly.toFixed(1)+'" r="4" fill="var(--accent)" stroke="var(--card)" stroke-width="2"/>'+
-     '<text x="'+lx.toFixed(1)+'" y="'+(ly-11).toFixed(1)+'" text-anchor="middle" font-size="12" font-weight="600" font-family="JetBrains Mono,monospace" fill="var(--ink)" stroke="var(--card)" stroke-width="4" paint-order="stroke">'+L.t.toFixed(1)+'</text>';
+     '<text x="'+lx.toFixed(1)+'" y="'+(ly-11).toFixed(1)+'" text-anchor="middle" font-size="12" font-weight="600" fill="var(--ink)" stroke="var(--card)" stroke-width="4" paint-order="stroke">'+L.t.toFixed(1)+'</text>';
   box.innerHTML = s + '</svg>';
 }
 
 function renderCheckin(){
   var box = $("checkin"), now = midnight(new Date()), tr = trendSeries();
   var last = tr.length ? tr[tr.length-1] : null, rate = lossRate(21);
-  var goal = now <= DEC ? W_DEC : W_END, target = now <= DEC ? DEC : END;
-  var weeksLeft = Math.max(1, (target - now)/DAY/7);
-  var needed = last ? (last.t - goal)/weeksLeft : null;
+  var p = plan(), needed = last && p.goal != null && last.t > p.goal ? p.pace : null;
   var waists = tr.filter(function(p){ return p.waist != null && p.waist !== ""; });
   var wd = null;
   if (waists.length >= 2) {
@@ -1309,7 +1390,7 @@ function renderCheckin(){
     // aim from measured maintenance when we have it, but move at most one step, in the verdict's direction
     var aim = cur + v.adjust;
     if (est && needed !== null) {
-      var want = clamp(needed, 0.35, Math.min(1.0, (last ? last.t : W0) * 0.01));
+      var want = clamp(needed, 0.35, Math.min(1.0, (last ? last.t : 100) * 0.01));
       aim = round50(est.tdee - want*KCAL_PER_KG/7);
     }
     var lo = v.adjust < 0 ? cur + v.adjust : cur + 50, hi = v.adjust < 0 ? cur - 50 : cur + v.adjust;
@@ -1317,7 +1398,7 @@ function renderCheckin(){
   }
   box.className = "card verdict " + (v.tone || "");
   box.innerHTML =
-    '<h2>Weekly check-in <span class="aside">'+(rate===null?"NEEDS 10+ DAYS OF WEIGH-INS":"NEED "+(needed===null?"—":needed.toFixed(2))+" KG/WK")+'</span></h2>'+
+    '<h2>Weekly check-in <span class="aside">'+(rate===null?"NEEDS 10+ DAYS OF WEIGH-INS":"YOUR PACE "+(needed===null?"—":needed.toFixed(2))+" KG/WK")+'</span></h2>'+
     '<div class="title">'+esc(v.title)+'</div><p class="sub">'+esc(v.text)+'</p>'+
     '<div class="tiny">Logged '+Math.round(c.logged*7)+' of 7 days'+(c.steps?' · '+fmt(c.steps)+' steps a day':'')+(wd!==null?' · waist '+(wd<=0?"−":"+")+Math.abs(wd).toFixed(1)+' cm in two weeks':'')+'</div>'+
     (suggested !== null && Math.abs(suggested - cur) >= 50
@@ -1334,7 +1415,7 @@ function renderCheckin(){
 
 function renderWeeks(){
   var w = weekNo(TODAY);
-  if (w < 1){ $("weeks").innerHTML = '<div class="empty">Starts 1 September.</div>'; return; }
+  if (w < 1){ $("weeks").innerHTML = '<div class="empty">No weeks yet.</div>'; return; }
   var rows = [];
   for (var i = w; i >= Math.max(1, w-7); i--){
     var a = weekStart(i), b = addDays(a, 6), k = 0, p = 0, n = 0;
@@ -1371,16 +1452,19 @@ function renderProgress(){ renderStats(); renderChart(); renderCheckin(); render
 
 /* ============================ RENDER: PLAN ============================ */
 function renderPlan(){
-  var c = cfg(), w = weekNo(TODAY), pi = phaseFor(w);
-  var milk4 = prettyDate(weekStart(4),{day:"numeric",month:"short"}), milk6 = prettyDate(weekStart(6),{day:"numeric",month:"short"});
+  var c = cfg(), p = plan(), pi = stageNow(), pe = planEnd();
   $("pane-plan").innerHTML =
   '<div class="card">'+
-    '<h2>The shape of it <span class="aside">105 → 92 → 82</span></h2>'+
-    '<div class="timeline">'+PHASES.map(function(p,i){
-      return '<div class="ph '+(i===pi?"on":i<pi?"done":"")+'"><span class="h">'+p.name+'</span><span class="w">WK '+p.from+'–'+p.to+' · '+p.dates.toUpperCase()+'</span>'+
-             '<div class="b">'+esc(p.body)+'</div></div>';
+    '<h2>The shape of it <span class="aside">'+(p.w0 != null && p.goal != null ? n1(p.w0)+" → "+p.goal+" KG" : "NO GOAL YET")+'</span></h2>'+
+    '<div class="timeline">'+STAGES.map(function(st,i){
+      return '<div class="ph '+(i===pi?"on":i<pi?"done":"")+'"><span class="h">'+st.name+'</span><span class="w">'+st.when.toUpperCase()+'</span>'+
+             '<div class="b">'+esc(st.body)+'</div></div>';
     }).join("")+'</div>'+
-    '<div class="banner accent" style="margin:14px 0 0;box-shadow:none;background:var(--sunk)"><span class="k">31 December</span><b>92 kg on the trend line</b> — not a lucky morning on the scale. The reward is already decided: clothes for the body you\'ll have then. Set the money aside now so it isn\'t a decision in December.</div>'+
+    '<div class="banner accent" style="margin:14px 0 0;box-shadow:none;background:var(--sunk)"><span class="k">Your plan</span>'+
+      (p.goal == null ? 'No goal yet. Set where you are going and how fast.'
+        : '<b>'+p.goal+' kg at '+p.pace+' kg a week</b>'+(pe ? ' — about '+new Date(pe).toLocaleDateString("en-IN",{month:"long",year:"numeric"})+' if you hold that pace' : '')+
+          '. The date is an answer, not a deadline. It moves when your real pace moves. Change the goal or the pace at any time.')+
+      ' <button class="link" id="plan-edit">Change the plan</button></div>'+
   '</div>'+
 
   '<div class="card">'+
@@ -1432,15 +1516,15 @@ function renderPlan(){
       '<li><b>Stop buying sweets.</b> The decision happens at the shop, not at 11 pm.</li>'+
       '<li>One planned treat a week — sitting down, off a plate, no screen. Log it.</li>'+
     '</ul></details>'+
-    '<details'+(milkTest(TODAY) ? " open" : "")+'><summary>Milk test — '+milk4+' to '+milk6+'</summary><ul>'+
-      '<li><b>Weeks 4–5 ('+milk4+' onward):</b> no milk in any form — tea, curd, paneer, ghee, whey, milk sweets. The scanner flags milk solids hidden in packets.</li>'+
-      '<li><b>'+milk6+', before food:</b> one large glass of plain milk. Watch the next 6 hours and write it in Notes.</li>'+
+    '<details><summary>Milk test — any two weeks you choose</summary><ul>'+
+      '<li><b>Two weeks:</b> no milk in any form — tea, curd, paneer, ghee, whey, milk sweets. The scanner flags milk solids hidden in packets.</li>'+
+      '<li><b>Day 15, before food:</b> one large glass of plain milk. Watch the next 6 hours and write it in Notes.</li>'+
       '<li>Bad reaction after two clean weeks → <b>lactose.</b> Curd, aged cheese and whey isolate are still fine.</li>'+
       '<li>Reacts to curd and isolate too → milk protein. Drop dairy entirely and get protein from eggs, meat, soya.</li>'+
       '<li>No reaction → dairy is fine. Milk wasn\'t the problem; you\'ve ruled it out for good.</li>'+
     '</ul></details>'+
     '<details><summary>Exam weeks — the floor</summary><p>When everything falls apart, switch the day to <b>Exam</b>. Calories go to maintenance. Keep only the floor: <b>morning protein, a session or two, your steps, the posture circuit, sleep.</b> Two full-body sessions in the week is enough. Holding weight through an exam week is a successful week — three earlier attempts ended exactly here.</p></details>'+
-    '<details><summary>Diet break — week 13</summary><p>24–30 November at maintenance, protein unchanged. Expect the scale to rise 0.5–1 kg in the first days: glycogen and water, not fat — the trend line ignores it. It makes the six weeks after it much easier.</p></details>'+
+    '<details><summary>Diet break — every 10 to 12 weeks</summary><p>One week at maintenance, protein unchanged. Switch those days to <b>Break</b>. Expect the scale to rise 0.5–1 kg in the first days: glycogen and water, not fat — the trend line ignores it. It makes the weeks after it much easier.</p></details>'+
   '</div>'+
 
   '<div class="card">'+
@@ -1479,26 +1563,36 @@ function renderPlan(){
   '</div>'+
 
   '<div class="card">'+
-    '<h2>Bloodwork <span class="aside">NOW · JAN · APR</span></h2>'+
+    '<h2>Bloodwork <span class="aside">NOW · +4 MONTHS · AT GOAL</span></h2>'+
     '<ul>'+
       '<li><b>HbA1c</b> + fasting glucose · <b>fasting insulin</b> (HOMA-IR) — the key ones, given the skin</li>'+
       '<li>Lipid profile · TSH, free T4</li><li>Vitamin D (25-OH) · B12 · ferritin, CBC</li><li>LFT — fatty liver shows up here first</li>'+
     '</ul>'+
-    '<p class="tiny">Take the report to a doctor rather than reading it alone. Fasting insulin and HbA1c falling by January is the best proof the plan is working — better than the scale.</p>'+
+    '<p class="tiny">Take the report to a doctor rather than reading it alone. Fasting insulin and HbA1c falling at the second test is the best proof the plan is working — better than the scale.</p>'+
   '</div>'+
 
   '<div class="card">'+
-    '<h2>After 30 April</h2>'+
+    '<h2>After the goal</h2>'+
     '<p class="sub">Add 100 kcal a week until the trend has been flat for two weeks. That number is your new maintenance. Keep weighing daily, keep the morning protein, keep the Sunday check-in — the rule becomes “if the trend rises 1.5 kg above the floor, run two weeks at the old target.” Every previous attempt treated the finish line as the end. It\'s the start of the part that lasts.</p>'+
   '</div>';
   $("plan-settings").addEventListener("click", openSettings);
+  $("plan-edit").addEventListener("click", openSettings);
 }
 function kKcalMaint(){ var e = maintenanceEstimate(); return round50(e ? e.tdee : cfg().maint); }
 
 /* ============================ SETTINGS ============================ */
 function openSettings(){
-  var c = cfg(), cur = document.documentElement.getAttribute("data-theme") || "auto";
+  var c = cfg(), p = plan(), cur = document.documentElement.getAttribute("data-theme") || "auto";
   openSheet("Settings",
+    '<h4 class="sect" style="margin-top:0">Your plan</h4>'+
+    '<div class="grid2">'+
+      '<div class="field"><label class="lbl" for="st-w0">Start weight, kg</label><input class="num" id="st-w0" type="number" step="0.1" inputmode="decimal" placeholder="first weigh-in" value="'+(p.w0 == null ? "" : n1(p.w0))+'"></div>'+
+      '<div class="field"><label class="lbl" for="st-g">Goal weight, kg</label><input class="num" id="st-g" type="number" step="0.5" inputmode="decimal" placeholder="e.g. 82" value="'+(p.goal == null ? "" : p.goal)+'"></div>'+
+    '</div>'+
+    '<div class="field" style="margin-top:10px"><label class="lbl" for="st-pace">Pace, kg a week <span class="muted">— 0.5 gentle · 0.7 steady · 1.0 hard</span></label><input class="num" id="st-pace" type="number" step="0.05" inputmode="decimal" value="'+p.pace+'"></div>'+
+    '<p class="tiny">Started '+prettyDate(p.start, {day:"numeric",month:"short",year:"numeric"})+'. No end date: the finish moves with your real pace. <button class="link" id="st-restart">Start again from today</button></p>'+
+    '<h4 class="sect">Targets</h4>'+
+    '<p class="tiny" style="margin:0 0 8px">These follow your weight and pace until you type your own number.</p>'+
     '<div class="grid2">'+
       '<div class="field"><label class="lbl" for="st-k">Calorie target</label><input class="num" id="st-k" type="number" inputmode="numeric" value="'+c.kcal+'"></div>'+
       '<div class="field"><label class="lbl" for="st-p">Protein, g</label><input class="num" id="st-p" type="number" inputmode="numeric" value="'+c.protein+'"></div>'+
@@ -1553,10 +1647,20 @@ function openSettings(){
         $$("[data-t]", $("st-t")).forEach(function(x){ x.className = x===b ? "on" : ""; });
         applyTheme(b.dataset.t);
       }); });
+      $("st-restart").addEventListener("click", function(){
+        var t = trendOn(TODAY);
+        setSetting("planStart", TODAY);
+        if (t) setSetting("startWeight", n1(t));
+        closeSheet(); renderAll(); toast("Plan starts again from today");
+      });
       $("st-save").addEventListener("click", function(){
-        var k = num($("st-k").value), p = num($("st-p").value), m = num($("st-m").value);
+        var g = num($("st-g").value), w0 = num($("st-w0").value), pc = num($("st-pace").value);
+        if (g && g >= 40 && g <= 200 && g !== p.goal) setSetting("goal", g);
+        if (w0 && w0 >= 40 && w0 <= 300 && w0 !== p.w0) setSetting("startWeight", w0);
+        if (pc && pc >= 0.2 && pc <= 1.2 && pc !== p.pace) setSetting("pace", pc);
+        var k = num($("st-k").value), pr = num($("st-p").value), m = num($("st-m").value);
         if (k && k >= 1500 && k <= 4000 && k !== c.kcal) setSetting("kcal", k);
-        if (p && p >= 60 && p <= 250 && p !== c.protein) setSetting("protein", p);
+        if (pr && pr >= 60 && pr <= 250 && pr !== c.protein) setSetting("protein", pr);
         if (m && m >= 1800 && m <= 4500 && m !== c.maint) setSetting("maint", m);
         closeSheet(); renderAll(); toast("Settings saved");
       });
@@ -1584,6 +1688,7 @@ function show(t){
 $$("nav.tabs [data-t]").forEach(function(b){ b.addEventListener("click", function(){ show(b.dataset.t); }); });
 
 document.addEventListener("click", function(ev){
+  if (ev.target.closest && ev.target.closest("[data-today]")) { CUR = TODAY; renderAll(); return; }
   var b = ev.target.closest && ev.target.closest("[data-step]");
   if (!b || b.disabled) return;
   var next = addDays(CUR, +b.dataset.step);
@@ -1642,7 +1747,7 @@ if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
 if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js");
 
 function demoData(){
-  var M = { log:[], foodLog:[], foods:[], settings:{} }, mid = 0;
+  var M = { log:[], foodLog:[], foods:[], settings:{ goal:92, pace:0.7 } }, mid = 0;
   for (var di = 34, dw = 105.2; di >= 1; di--) {
     var ds = iso(new Date(Date.now() - di*DAY));
     dw += -0.11 + (Math.sin(di*1.7) * 0.45) - (Math.sin((di+1)*1.7) * 0.45);
